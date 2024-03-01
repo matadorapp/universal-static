@@ -1,0 +1,134 @@
+---
+version: 2.1
+
+orbs:
+  ecr-build-tag-push: matadorapp/ecr-build-tag-push@6
+  slack: circleci/slack@4
+  terraform: matadorapp/terraform-orb@3
+
+executors:
+  build_machine:
+    machine:
+      image: ubuntu-2004:202010-01
+    resource_class: medium
+
+  terraformbase:
+    environment:
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_PAGER: cat
+    docker:
+      - image: 323970663242.dkr.ecr.us-east-1.amazonaws.com/terraformbase:9
+        auth:
+          username: $ECR_USERNAME
+          password: $ECR_PASSWORD
+    resource_class: small
+
+  terraformtesting:
+    environment:
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_PAGER: cat
+    docker:
+      - image: 323970663242.dkr.ecr.us-east-1.amazonaws.com/terraformtesting:9
+        auth:
+          username: $ECR_USERNAME
+          password: $ECR_PASSWORD
+    resource_class: small
+
+jobs:
+  test_terraform:
+    executor: terraformtesting
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - ecr-build-tag-push/setup_aws_profiles_static_credentials:
+          base_role_arn: arn:aws:iam::667067828619:role/circleci_sso
+          target_profile: default
+          target_role_arn: arn:aws:iam::323970663242:role/circleci_build
+      - run:
+          name: Exclude tfsec cost tags check, done via default_tags
+          command: rm -f /root/.tfsec/required_cost_tag_tfchecks.yaml
+      - terraform/test_terraform
+      - store_artifacts:
+          path: /tmp/terraform_test_results/*.json
+      - store_test_results:
+          path: /tmp/terraform_test_results/*.xml
+      - when:
+          condition:
+            equal: [main, << pipeline.git.branch >>]
+          steps:
+            - slack/notify:
+                channel: pod-platform-alarms
+                event: fail  # This step will run every time including when the when: on_fail step also fail to run
+                template: basic_fail_1
+
+  terraform_plan:
+    executor: terraformbase
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - ecr-build-tag-push/setup_aws_profiles_static_credentials:
+          base_role_arn: arn:aws:iam::667067828619:role/circleci_deploy
+          target_profile: default
+          target_role_arn: arn:aws:iam::367193793898:role/OrganizationAccountAccessRole
+      - run:
+          name: Setup TF_VARs
+          command: |
+            echo "export TF_VAR_environment=universal" >> "${BASH_ENV}"
+      - terraform/init_remote_state:
+          terraform_directory: .
+          unique_state_identifier: universal
+      - terraform/plan:
+          terraform_directory: .
+
+  terraform_apply:
+    executor: terraformbase
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - ecr-build-tag-push/setup_aws_profiles_static_credentials:
+          base_role_arn: arn:aws:iam::667067828619:role/circleci_deploy
+          target_profile: default
+          target_role_arn: arn:aws:iam::367193793898:role/OrganizationAccountAccessRole
+      - run:
+          name: Setup TF_VARs
+          command: |
+            echo "export TF_VAR_environment=universal" >> "${BASH_ENV}"
+      - terraform/init_remote_state:
+          terraform_directory: .
+          unique_state_identifier: universal
+      - terraform/apply:
+          terraform_directory: .
+      - slack/notify:
+          channel: pod-platform-alarms
+          event: fail  # This step will run every time including when the when: on_fail step also fail to run
+          template: basic_fail_1
+
+workflows:
+  universal:
+    jobs:
+      - test_terraform:
+          context:
+            - ecr-image-pull
+            - slack-global-token
+
+      - terraform_plan:
+          name: terraform_plan
+          context:
+            - build
+            - ecr-image-pull
+
+      - terraform_apply:
+          name: terraform_apply
+          context:
+            - build
+            - ecr-image-pull
+            - slack-global-token
+          requires:
+            - test_terraform
+          filters:
+            branches:
+              only:
+                - main
