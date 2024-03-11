@@ -41,6 +41,21 @@ resource "aws_cloudfront_distribution" "universal" {
   }
 
   ordered_cache_behavior {
+    path_pattern     = "/static_external/*"
+    allowed_methods  = ["GET", "HEAD"]
+    cached_methods   = ["GET", "HEAD"]
+    target_origin_id = local.bucket_name
+
+    cache_policy_id          = data.aws_cloudfront_cache_policy.aws_managed_caching_optimized.id
+    origin_request_policy_id = data.aws_cloudfront_origin_request_policy.aws_managed_cors_s3.id
+
+    compress               = true
+    viewer_protocol_policy = "redirect-to-https"
+
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.static_external[0].id
+  }
+
+  ordered_cache_behavior {
     path_pattern     = "/*"
     allowed_methods  = ["GET", "HEAD"]
     cached_methods   = ["GET", "HEAD"]
